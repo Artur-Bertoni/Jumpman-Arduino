@@ -32,6 +32,10 @@ const int MAX_OBST                   = 4;
 const int OBST_WIDTH                 = 20;
 const int OBST_HEIGHTS[]             = {20,40};
 
+const int melody[]     = { 262, 294, 330, 349, 330, 294, 262 };
+const int noteDur[]    = { 500, 500, 500, 500, 500, 500, 500 };  // em ms
+const int melodyLen    = sizeof(melody)/sizeof(melody[0]);
+
 struct Obstacle { int x, h; bool active; };
 Obstacle obst[MAX_OBST];
 int prevObstX[MAX_OBST], prevObstH[MAX_OBST];
@@ -39,9 +43,11 @@ int prevObstX[MAX_OBST], prevObstH[MAX_OBST];
 bool     inStart      = true;
 bool     gameOver     = false;
 bool     inTransition = false;
+bool     blinkState   = false;
+unsigned long blinkT       = 0;
 unsigned long lastFrame    = 0;
 unsigned long lastObstacle = 0;
-int      phase           = 1;
+int      level           = 1;
 float    speedMultiplier = 1.0;
 int      playerY         = PLAYER_Y0;
 int      prevPlayerY     = PLAYER_Y0;
@@ -50,6 +56,8 @@ int      highScore       = 0;
 unsigned long currJumpDuration;
 int           currObstStep;
 unsigned long currObstInterval;
+int currentNote         = 0;
+unsigned long noteStart = 0;
 
 // ==== Display Helpers ====================================================
 
@@ -86,15 +94,10 @@ void drawStartScreen() {
   tft.fillCircle(SCREEN_W/2, SCREEN_H/3 + 30, 60, YELLOW);
   tft.setTextSize(4);
   tft.setTextColor(BLACK);
-  const char* title = "Jumpman";
+  const char* title = "JUMPMAN 2.0";
   int16_t tw = strlen(title) * 6 * 4;
   tft.setCursor((SCREEN_W - tw)/2, SCREEN_H/2 - 40);
   tft.print(title);
-  tft.setTextSize(2);
-  const char* pr = "Press to Start";
-  int16_t pw = strlen(pr) * 6 * 2;
-  tft.setCursor((SCREEN_W - pw)/2, SCREEN_H/2 + 20);
-  tft.print(pr);
 }
 
 void drawGround() {
@@ -106,20 +109,39 @@ void drawHUDStatic() {
   tft.setTextSize(2);
   tft.setTextColor(WHITE);
   tft.setCursor(10, 3);   tft.print("Score:");
-  tft.setCursor(170, 3);  tft.print("Phase:");
+  tft.setCursor(170, 3);  tft.print("Level:");
   tft.setCursor(310, 3);  tft.print("Highest:");
 }
 
 void updateHUD() {
-  unsigned long nextThreshold = 10UL * phase * (phase+1) / 2;
+  unsigned long nextThreshold = 10UL * level * (level+1) / 2;
   char buf[16];
   sprintf(buf, "%d/%lu", score, nextThreshold);
   tft.fillRect(82, 3, 60, 16, BLACK);
   tft.setCursor(82, 3);  tft.print(buf);
   tft.fillRect(240, 3, 40, 16, BLACK);
-  tft.setCursor(240, 3); tft.print(phase);
+  tft.setCursor(240, 3); tft.print(level);
   tft.fillRect(410, 3, 40, 16, BLACK);
   tft.setCursor(410, 3); tft.print(highScore);
+}
+
+void drawGradientBand(int y0, int h) {
+  const int bands = 20;
+  int bandH = SCREEN_H / bands + 1;
+  int startBand = y0 / bandH;
+  int endBand   = (y0 + h) / bandH;
+  if (startBand < 0) startBand = 0;
+  if (endBand > bands-1) endBand = bands-1;
+  for (int b = startBand; b <= endBand; b++) {
+    float t = b / float(bands - 1);
+    uint16_t color = tft.color565(
+      255,
+      uint8_t(100*(1-t) + 200*t),
+      uint8_t(0*(1-t)   + 50*t)
+    );
+    int y = b * bandH;
+    tft.fillRect(0, y, SCREEN_W, bandH, color);
+  }
 }
 
 // ==== Input & Player ====================================================
@@ -150,6 +172,7 @@ void handleJump() {
 // ==== Game Loop ==========================================================
 
 void updateGame() {
+  //updateMusic();
   tft.fillCircle(PLAYER_X + PLAYER_SIZE/2,
                  prevPlayerY + PLAYER_SIZE/2,
                  PLAYER_SIZE/2,
@@ -209,29 +232,33 @@ void updateGame() {
   updateHUD();
 }
 
-// ==== Phase Transition ==================================================
+// ==== Level Transition ==================================================
 
-void beginPhaseTransition() {
+void beginLevelTransition() {
   inTransition = true;
+
   drawGradientBackground();
-  tft.setTextSize(3);
-  tft.setTextColor(BLACK);
-  char bufPhase[16];
-  sprintf(bufPhase, "Phase %d", phase+1);
-  int16_t wP = strlen(bufPhase)*6*3;
-  tft.setCursor((SCREEN_W - wP)/2, SCREEN_H/2 - 20);
-  tft.print(bufPhase);
-  delay(2000);
+  char bufLevel[16];
+  sprintf(bufLevel, "LEVEL %d", level+1);
+  showCentered(bufLevel, 3, BLACK);
+  playTone(550,750);
+  delay(1000);
+
   drawGradientBackground();
-  showCentered("Ready?", 3, BLACK);
-  delay(2000);
+  showCentered("READY?", 3, BLACK);
+  playTone(550,750);
+  delay(1000);
+
   drawGradientBackground();
-  showCentered("Go!", 4, BLACK);
-  delay(2000);
+  showCentered("GO!", 4, BLACK);
+  playTone(550,750);
+  delay(1000);
+
   speedMultiplier *= 1.15;
   currObstStep     = int(BASE_OBST_STEP * speedMultiplier);
   currObstInterval = (unsigned long)(BASE_OBST_INTERVAL / speedMultiplier);
   currJumpDuration = (unsigned long)(BASE_JUMP_DURATION / speedMultiplier);
+
   tft.fillScreen(CYAN);
   drawGround();
   drawHUDStatic();
@@ -239,18 +266,29 @@ void beginPhaseTransition() {
   lastFrame    = millis();
   lastObstacle = millis();
   for (int i = 0; i < MAX_OBST; i++) obst[i].active = false;
+
   playerY = prevPlayerY = PLAYER_Y0;
-  tft.fillCircle(PLAYER_X + PLAYER_SIZE/2,
-                 playerY + PLAYER_SIZE/2,
-                 PLAYER_SIZE/2,
-                 PURPLE);
-  phase++;
+  tft.fillCircle(
+    PLAYER_X + PLAYER_SIZE/2,
+    playerY   + PLAYER_SIZE/2,
+    PLAYER_SIZE/2,
+    PURPLE
+  );
+
+  level++;
   inTransition = false;
+  playTone(1000,1000);
 }
 
 // ==== Game Over =========================================================
 
 void triggerGameOver() {
+  tft.fillCircle(
+    PLAYER_X + PLAYER_SIZE/2,
+    playerY   + PLAYER_SIZE/2,
+    PLAYER_SIZE/2,
+    PURPLE
+  );
   playDeathSound();
   gameOver = true;
   if (score > highScore) {
@@ -263,13 +301,13 @@ void triggerGameOver() {
   drawSkull(SCREEN_W - 10 - 30, 10 + 30, 30);
   tft.setTextSize(4);
   tft.setTextColor(WHITE);
-  const char* line1 = "Game Over!";
+  const char* line1 = "GAME OVER!";
   int16_t w1 = strlen(line1)*6*4;
   tft.setCursor((SCREEN_W - w1)/2, 40);
   tft.print(line1);
-  unsigned long nextThreshold = 10UL * phase * (phase+1) / 2;
+  unsigned long nextThreshold = 10UL * level * (level+1) / 2;
   char buf1[32];
-  sprintf(buf1, "Phase: %d   Score: %d/%lu", phase, score, nextThreshold);
+  sprintf(buf1, "Level: %d   Score: %d/%lu", level, score, nextThreshold);
   tft.setTextSize(3);
   int16_t w2 = strlen(buf1)*6*3;
   tft.setCursor((SCREEN_W - w2)/2, 120);
@@ -280,16 +318,12 @@ void triggerGameOver() {
   int16_t w3 = strlen(buf2)*6*2;
   tft.setCursor((SCREEN_W - w3)/2, 180);
   tft.print(buf2);
-  const char* pr = "Press to Restart";
-  int16_t w4 = strlen(pr)*6*2;
-  tft.setCursor((SCREEN_W - w4)/2, 240);
-  tft.print(pr);
 }
 
 void gameOverBloodAnimation() {
-  const int DRIPS = 40, PHASES = 2, steps = 50;
+  const int DRIPS = 40, LEVELS = 2, steps = 50;
   const int W[2] = {6,12};
-  for (int p = 0; p < PHASES; p++) {
+  for (int p = 0; p < LEVELS; p++) {
     int w = W[p], dripX[DRIPS], dripY[DRIPS];
     for (int i = 0; i < DRIPS; i++) { dripX[i] = random(0,SCREEN_W); dripY[i] = 0; }
     for (int s = 0; s < steps; s++) {
@@ -336,14 +370,17 @@ void drawSkull(int16_t cx, int16_t cy, int16_t r) {
 
 void resetGame() {
   drawGradientBackground();
-  showCentered("Phase 1", 3, BLACK);
-  delay(2000);
+  showCentered("LEVEL 1", 3, BLACK);
+  playTone(550,750);
+  delay(1000);
   drawGradientBackground();
-  showCentered("Ready?", 3, BLACK);
-  delay(2000);
+  showCentered("READY?", 3, BLACK);
+  playTone(550,750);
+  delay(1000);
   drawGradientBackground();
-  showCentered("Go!", 4, BLACK);
-  delay(2000);
+  showCentered("GO!", 4, BLACK);
+  playTone(550,750);
+  delay(1000);
   score = 0;
   gameOver = false;
   inTransition = false;
@@ -352,7 +389,7 @@ void resetGame() {
   currJumpDuration = BASE_JUMP_DURATION;
   currObstStep     = BASE_OBST_STEP;
   currObstInterval = BASE_OBST_INTERVAL;
-  phase = 1;
+  level = 1;
   tft.fillScreen(CYAN);
   drawGround();
   drawHUDStatic();
@@ -363,10 +400,62 @@ void resetGame() {
                  playerY + PLAYER_SIZE/2,
                  PLAYER_SIZE/2,
                  PURPLE);
+  playTone(1000,1000);
 }
 
-void playScoreSound() { tone(BUZZER_PIN,523,80); }
-void playDeathSound() { tone(BUZZER_PIN,220,200); }
+void playTone(int pTone, int pTime) { tone(BUZZER_PIN,pTone,pTime); }
+void playScoreSound() { playTone(523,80); }
+void playDeathSound() { 
+  playTone(300,500);
+  delay(750);
+  playTone(250,500);
+  delay(750);
+  playTone(200,500);
+  delay(750);
+  playTone(150,500);
+  delay(750);
+
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+  playTone(100,750);
+  delay(200);
+}
+void playTransitionMusic(unsigned long duration) {
+  unsigned long start = millis();
+  while (millis() - start < duration) {
+    tone(BUZZER_PIN, 440, 180);
+    delay(250);
+    tone(BUZZER_PIN, 660, 180);
+    delay(250);
+    tone(BUZZER_PIN, 880, 180);
+    delay(250);
+    tone(BUZZER_PIN, 660, 180);
+    delay(250);
+    tone(BUZZER_PIN, 440, 180);
+    delay(250);
+  }
+  noTone(BUZZER_PIN);
+}
+void updateMusic() {
+  unsigned long now = millis();
+  if (now - noteStart >= noteDur[currentNote]) {
+    noteStart = now;
+    currentNote = (currentNote + 1) % melodyLen;
+    tone(BUZZER_PIN, melody[currentNote]);
+  }
+}
 
 // ==== Arduino Core ======================================================
 
@@ -389,16 +478,49 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
   if (inStart) {
+    if (now - blinkT > 1000) {
+      blinkT = now;
+      blinkState = !blinkState;
+
+      const int ty = SCREEN_H/2 + 60;
+      const int th = 16;
+      drawGradientBand(ty - 2, th + 4);
+
+      if (blinkState) {
+        tft.setTextSize(2);
+        tft.setTextColor(BLACK);
+        const char* pr = "Press to Start";
+        int16_t pw = strlen(pr)*6*2;
+        tft.setCursor((SCREEN_W - pw)/2, ty);
+        tft.print(pr);
+      }
+    }
+
     if (isButtonPressed()) {
       inStart = false;
       resetGame();
     }
     return;
   }
+
   if (gameOver) {
+    if (now - blinkT > 1000) {
+      blinkT = now;
+      blinkState = !blinkState;
+      tft.fillRect(0, 240, SCREEN_W, 16, RED);
+      if (blinkState) {
+        tft.setTextSize(2);
+        tft.setTextColor(WHITE);
+        const char* pr = "Press to Restart";
+        int16_t pw = strlen(pr)*6*2;
+        tft.setCursor((SCREEN_W-pw)/2, 240);
+        tft.print(pr);
+      }
+    }
     if (isButtonPressed()) {
-      phase = 1;
+      level = 1;
       speedMultiplier = 1.0;
       currJumpDuration = BASE_JUMP_DURATION;
       currObstStep     = BASE_OBST_STEP;
@@ -407,15 +529,20 @@ void loop() {
       gameOver = false;
       tft.fillScreen(BLACK);
       drawStartScreen();
+      blinkState = false;
+      blinkT = millis();
     }
     return;
   }
+
   if (inTransition) return;
+
   handleJump();
   if (now - lastFrame >= FRAME_TIME) {
     lastFrame = now;
     updateGame();
-    unsigned long nextThreshold = 10UL * phase * (phase+1) / 2;
-    if (score >= nextThreshold) beginPhaseTransition();
+    unsigned long nextThreshold = 10UL * level * (level+1) / 2;
+    if (score >= nextThreshold) beginLevelTransition();
   }
 }
+
